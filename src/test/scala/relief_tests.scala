@@ -13,12 +13,12 @@ class relief_tests extends FunSuite{
 
   test("relief simple test") {
     val test_data = sc.parallelize(
-      Seq(("class1", Gse("class1", "a", "b", Array(1, 0, 0, 0))),
-        ("class1", Gse("class1", "b", "y", Array(1, 1, 0, 0))),
-        ("class2", Gse("class2", "c", "y", Array(0, 0, 0, 0))),
-        ("class2", Gse("class2", "d", "y", Array(0, 1, 0, 0))))
+      Seq(("class1", Gse("a", "a", "class1", Array(1, 1, 0, 0))),
+        ("class1", Gse("b", "b", "class1", Array(1, 1, 0, 0))),
+        ("class2", Gse("c", "c", "class2", Array(0, 0, 0, 0))),
+        ("class2", Gse("d", "d", "class2", Array(0, 1, 0, 0))))
     )
-    println(LGA.relief(test_data, ("class1", "class2"), 3, 4)(LGA.manhattan).toList)
+    println(LGA.relief(test_data, ("class1", "class2"), 4, 4)(LGA.manhattan).toList)
 
   }
 }
