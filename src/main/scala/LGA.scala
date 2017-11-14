@@ -121,12 +121,16 @@ class LGA extends Serializable {
     }
     w
   }
+  def diffOfElements(a1 : Array[Float], a2 : Array[Float])(fct : (Float, Float) => Float) : Array[Float] = {
+    assert(a1.length == a2.length)
+    a1.zip(a2).map{s => fct(s._1, s._2)}
+  }
   //Relief Algorithm Implementation
   def relief(gse_data : RDD[(String, Gse)], classes : (String, String), n : Int, n_genes : Int)(diff: (Float, Float) => Float) : Array[Float] = {
     val w = new Array[Float](n_genes)
     val gse_together : RDD[Gse] = gse_data.filter{case (s, _) => s.equals(classes._1) || s.equals(classes._2)}.values
-    val gse_c1 = gse_data.filter{case (s, _) => s.equals(classes._1)}
-    val gse_c2 = gse_data.filter{case (s, _) => s.equals(classes._2)}
+    val gse_c1 = gse_data.filter{case (s, _) => s.equals(classes._1)}.persist()
+    val gse_c2 = gse_data.filter{case (s, _) => s.equals(classes._2)}.persist()
 
     def nearestN(neighbours : RDD[(String, Gse)], r : Gse) : Gse = {
       def nearer(g1 : Gse, g2 : Gse) : Gse = {
@@ -148,10 +152,49 @@ class LGA extends Serializable {
     }
     w
   }
-  //RefiefF algorithm implementation allowing multi-class feature selection
-  def reliefF(gse_data : RDD[(String, Gse)], classes : (String, String), n : Int, n_genes : Int)(diff: (Float, Float) => Float) : Array[Float] = {
+
+  def kNearest(g : Gse, k : Int, gse_data : Iterable[Gse])(diff: (Float, Float) => Float): List[Gse] ={
+    gse_data.toList.sortBy(gse => diffOfArrays(gse.geneData, g.geneData)(diff)).take(k)
+  }
+  //TODO: TEST RELIEFF EXTENSIVELY
+  //ReliefF algorithm implementation allowing multi-class feature selection
+  def reliefF(gse_data : RDD[(String, Gse)], n : Int, k: Int, n_genes : Int, n_classes : Int, classesProbabilities : Map[String, Float])(diff: (Float, Float) => Float) : Array[Float] = {
     val w = new Array[Float](n_genes)
-    null
+    //Group by subtype, costy operation
+    val gse_grouped : RDD[(String, Iterable[Gse])] = gse_data.map{
+      case (_, gse @ Gse(_, _, stype, _)) => (stype, gse)
+    }.groupByKey().persist()
+
+    for(r <- gse_data.takeSample(withReplacement = false, n)){
+      //Find the k nearest hits
+      val khits : List[Gse] = kNearest(r._2, k, gse_grouped.filter{case (cl, _) => cl == r._1}.values.collect()(0)
+        .filter(_.id != r._2.id))(diff)
+      //Find the k nearest misses per class
+      val kmisses : Map[String, List[Gse]] = gse_grouped.filter{_._1 != r._1}.mapValues(v => kNearest(r._2, k, v)(diff))
+        .collect().toMap
+
+      //Compute the weights to be added/subtracted to our weight vector
+      val hitsWeight : Array[Float] = khits.map(gse => diffOfElements(r._2.geneData, gse.geneData)(diff))
+          .reduce(diffOfElements(_, _)(_ + _)).map(_ / (n * k))
+
+      val pNotR = 1 - classesProbabilities(r._1)
+
+      val missesWeightList : List[Array[Float]] = kmisses.map{
+        case(cl, l) =>
+          val probFactor = classesProbabilities(cl) / pNotR
+          l.map(gse => diffOfElements(r._2.geneData, gse.geneData)(diff))
+            .reduce(diffOfElements(_, _)(_ + _)).map(_ * probFactor / (n * k))
+      }.toList
+
+      val missesWeight = missesWeightList.reduce(diffOfElements(_, _)(_ + _))
+
+      //update the weight vector
+      for(idx <- (0 until n_genes).par){
+        w(idx) -= hitsWeight(idx)
+        w(idx) += missesWeight(idx)
+      }
+    }
+    w
   }
 
   def manhattan(f1 : Float, f2 : Float) : Float = Math.abs(f1 - f2)
