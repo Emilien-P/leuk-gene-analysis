@@ -23,14 +23,11 @@ object LGA extends LGA {
     //Load the data into RDDs
     val gse_info : RDD[String] = sc.textFile("resources/GSE13159.info.txt")
       .mapPartitionsWithIndex { (idx, iter) => if (idx == 0) iter.drop(1) else iter } //drop header
-    val raw_genes = sc.textFile("resources/mile_transposed.csv")
+    val raw_genes = sc.textFile("resources/mile_transposed_preprocessed.csv")
     val raw_genes_splitted : RDD[(String, Array[Float])] = raw_genes
       .mapPartitionsWithIndex { (idx, iter) => if (idx == 0) iter.drop(1) else iter } //drop header
       .map(_.split(','))
       .map(a => (a(0).filter(_ != '\"'), a.slice(1, a.length).map(_.toFloat)))
-
-    //Group the gse_info by subtype
-    //TODO: Check the mean and variance of the gene expression level. Should normalize them
 
     val gse_empty : RDD[(String, Gse)] = gse_info.map(_.split('\t'))
       .map(a => (a(0), Gse(a(0), a(1), a(2), null)))
@@ -48,12 +45,9 @@ object LGA extends LGA {
 
 
     //KNN training and classifying test with relief genes selection
-    def knn_training_test() : Unit = {
-      val timeStamp : String = new SimpleDateFormat("yyyyMMddHHmm").format(new Date())
-      val outputWriter = new PrintWriter(new File("results/knn_relief" + timeStamp + ".txt"))
-      val nb_features = 3
-      val nb_nn = 20
-      val nb_sample = 25
+    def knn_training_test(nb_features : Int = 3, nb_nn : Int = 7, nb_sample : Int = 50, nb_sample_relief : Int = 200) : Unit = {
+      val timeStamp : String = new SimpleDateFormat("yyyyMMdd"/*HHmm"*/).format(new Date())
+      val outputWriter = new PrintWriter(new File(s"results/reliefParametersTestVsRandom/knn_relief$nb_features$nb_nn$nb_sample" + timeStamp + ".txt"))
       val class1 : String = "CLL"
       val class2 : String = "CML"
       outputWriter.write("Testing knn with relief with : \n")
@@ -61,7 +55,7 @@ object LGA extends LGA {
       outputWriter.write("\n\t number of features = " + nb_features)
       outputWriter.write("\n\t number of samples tested = " + nb_sample + "\n") //ROC curve ?
 
-      val weights = relief(gse_populated.map(p => (p._2.sampleType, p._2)), (class1, class2), 200, genes_number)(manhattan).toList
+      val weights = relief(gse_populated.map(p => (p._2.sampleType, p._2)), (class1, class2), nb_sample_relief, genes_number)(manhattan).toList
       val selected_genes = weights.zipWithIndex.sortBy(_._1).take(nb_features)
 
       val dataOfInterest : RDD[Gse] = gse_populated.filter{case (_, Gse(_, _, stype, _)) => stype.equals(class1) || stype.equals(class2)}.values
@@ -108,7 +102,73 @@ object LGA extends LGA {
       outputWriter.close()
     }
 
-    knn_training_test()
+    def knn_exaustive_parameters_test(max_nb_features : Int = 3, max_nb_nn : Int = 7, max_nb_sample : Int = 50, step : Int = 25, max_nb_sample_relief : Int = 200) : Unit = {
+      val timeStamp: String = new SimpleDateFormat("yyyyMMdd" /*HHmm"*/).format(new Date())
+      val outputWriter = new PrintWriter(new File(s"results/reliefParametersTestVsRandom/knn_relief$max_nb_features$max_nb_nn$max_nb_sample" + timeStamp + ".txt"))
+      val class1: String = "CLL"
+      val class2: String = "CML"
+      outputWriter.write("genes_selection_method,distance_method,nb_features,nb_nn," +
+        "class1,class1_nb_tested,class1_true_positive_rate,class2,class2_nb_tested,class2_true_positive_rate," +
+        "overall,nb_tested,true_positive_rate\n")
+
+      val dataOfInterest: RDD[Gse] = gse_populated.filter { case (_, Gse(_, _, stype, _)) => stype.equals(class1) || stype.equals(class2) }.values
+      val trainingData: RDD[Gse] = dataOfInterest.zipWithIndex.filter { case (_, idx) => idx % 2 == 0 }.keys.persist()
+      val testingData: RDD[Gse] = dataOfInterest.zipWithIndex.filter { case (_, idx) => idx % 2 != 0 }.keys.persist()
+
+      for (
+        nb_features <- 1 to max_nb_features;
+        nb_nn <- 1 to max_nb_nn;
+        nb_sample <- step to max_nb_sample by step;
+        nb_sample_relief <- step to max_nb_sample_relief by step
+      )
+      {
+        val weights = relief(dataOfInterest.map(p => (p.sampleType, p)), (class1, class2), nb_sample_relief, genes_number)(manhattan).toList
+        val selected_genes = weights.zipWithIndex.sortBy(_._1).take(nb_features)
+
+        val someSample = testingData.takeSample(withReplacement = false, nb_sample)
+
+        def testWithGenes(genesOfInterest: List[(Float, Int)], diff: (Float, Float) => Float, flags : List[String]): Unit = {
+          val knn = new KNN
+          //Training the knn-classifier
+          knn.init(trainingData, genesOfInterest.unzip._2, nb_nn)
+          var nb_success = 0f
+          var class1_success = 0f
+          var class2_success = 0f
+          var nb_class1 = 0
+          var nb_class2 = 0
+
+          for (s <- someSample) {
+            if (knn.classify(s)(diff).equals(s.sampleType)) {
+              nb_success += 1
+              if (s.sampleType.equals(class1))
+                class1_success += 1
+              else
+                class2_success += 1
+            }
+            if (s.sampleType.equals(class1))
+              nb_class1 += 1
+            else
+              nb_class2 += 1
+          }
+          val method = flags(0)
+          val distance = flags(1)
+          val class1_tp = class1_success / nb_class1
+          val class2_tp = class2_success / nb_class2
+          val overall_tp = nb_success / nb_sample
+          outputWriter.write(s"$method,$distance,$nb_features,$nb_nn," +
+            s"$class1,$nb_class1,$class1_tp," +
+            s"$class2,$nb_class2,$class2_tp," +
+            s"overall,$nb_sample,$overall_tp\n")
+        }
+
+        testWithGenes(selected_genes, manhattan, List("relief", "manhattan"))
+        val random_sample_genes = Random.shuffle(weights.zipWithIndex).take(nb_features)
+        testWithGenes(random_sample_genes, manhattan,  List("random", "manhattan"))
+      }
+      outputWriter.close()
+    }
+    //knn_training_test()
+    knn_exaustive_parameters_test(7,7,50,25,200)
   }
 
 }
