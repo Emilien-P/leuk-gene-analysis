@@ -4,6 +4,7 @@ version := "0.1"
 
 scalaVersion := "2.11.4"
 
+//Add Spark for multicluster computation
 libraryDependencies ++= {
   val sparkVer = "2.2.0"
   Seq(
