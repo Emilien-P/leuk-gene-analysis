@@ -12,4 +12,6 @@ libraryDependencies ++= {
   )
 }
 
+libraryDependencies += "com.github.haifengl" %% "smile-scala" % "1.5.0"
+
 libraryDependencies += "org.scalatest" %% "scalatest" % "3.0.4" % "test"

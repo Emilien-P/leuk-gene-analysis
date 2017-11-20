@@ -7,6 +7,8 @@ import java.util.Date
 
 import scala.util.Random
 
+import smile.regression._
+
 case class Gse (id : String, sampleTitle : String, sampleType : String, geneData : Array[Float])
 
 object LGA extends LGA {
@@ -36,12 +38,12 @@ object LGA extends LGA {
 
     val gse_populated : RDD[(String, Gse)]= joined.mapValues{
       case (Gse(id, stitle, stype, _), array) => Gse(id, stitle, stype, array)
-    }.persist
+    }//.persist
 
     //Group by subtype
     val gse_type : RDD[(String, Gse)] = gse_populated.map{
       case (_, gse @ Gse(_, _, stype, _)) => (stype, gse)
-    }
+    }.persist()
 
     val gse_grouped : RDD[(String, Iterable[Gse])] = gse_type.groupByKey()
 
@@ -51,6 +53,21 @@ object LGA extends LGA {
       }.map(gse => gse._2.geneData)
         .saveAsTextFile(className + "RawGeneData.csv")
     }
+
+    def lassoRegression(lambda : Int = 100) : Unit= {
+      val mapClassInt : Map[String, Int] = gse_grouped.keys.collect.zipWithIndex.toMap
+      val pair : Array[(Array[Double], Int)] = gse_populated.mapValues(gse => (gse.geneData.map(_.toDouble), mapClassInt(gse.sampleType))).values.collect()
+      val classesLabels : Array[Int] = pair.unzip._2
+      val geneDataArray : Array[Array[Double]] = pair.unzip._1
+
+      val lassoModel = lasso(geneDataArray, classesLabels.map(_.toDouble), lambda)
+
+      val timeStamp : String = new SimpleDateFormat("yyyyMMddHHmm").format(new Date())
+      val outputWriter = new PrintWriter(new File("results/lasso_output" + timeStamp + ".txt"))
+      outputWriter.write(lassoModel.toString)
+      outputWriter.close()
+    }
+
     //KNN training and classifying test with relief genes selection
     def knn_training_test(nb_features : Int = 3, nb_nn : Int = 7, nb_sample : Int = 50, nb_sample_relief : Int = 200) : Unit = {
       val timeStamp : String = new SimpleDateFormat("yyyyMMddHHmm").format(new Date())
@@ -121,7 +138,7 @@ object LGA extends LGA {
         "class1,class1_nb_tested,class1_true_positive_rate,class2,class2_nb_tested,class2_true_positive_rate," +
         "overall,nb_tested,true_positive_rate\n")
 
-      val dataOfInterest: RDD[Gse] = gse_populated.filter { case (_, Gse(_, _, stype, _)) => stype.equals(class1) || stype.equals(class2) }.values§
+      val dataOfInterest: RDD[Gse] = gse_populated.filter { case (_, Gse(_, _, stype, _)) => stype.equals(class1) || stype.equals(class2) }.values
       val trainingData: RDD[Gse] = dataOfInterest.zipWithIndex.filter { case (_, idx) => idx % 2 == 0 }.keys.persist()
       val testingData: RDD[Gse] = dataOfInterest.zipWithIndex.filter { case (_, idx) => idx % 2 != 0 }.keys.persist()
 
@@ -169,7 +186,6 @@ object LGA extends LGA {
             s"$class1,$nb_class1,$class1_tp," +
             s"$class2,$nb_class2,$class2_tp," +
             s"overall,$nb_sample,$overall_tp\n")
-          print("SHOULD PRINT")
         }
 
         testWithGenes(selected_genes, manhattan, List("relief", "manhattan"))
@@ -179,11 +195,25 @@ object LGA extends LGA {
       outputWriter.close()
     }
 
-    //knn_training_test(nb_features=1, nb_sample_relief = 200)
-    knn_exhaustive(max_nb_features = 5)
+    def reliefF_output(n : Int = 25) : Unit = {
+      val timeStamp : String = new SimpleDateFormat("yyyyMMddHHmm").format(new Date())
+      val outputWriter = new PrintWriter(new File("results/reliefF_output" + timeStamp + ".txt"))
+      val weights : Array[Float] = reliefF_print(gse_type, n, n_genes = genes_number, classesP = Option.empty)(manhattan)
 
-    //SmilePlotting.scatterPlot((6709, 3333, 5492), gse_type, Array("CML", "CLL"))
-    //SmilePlotting.scatterPlot((70, 12346), gse_type, Array("CML", "CLL"))
+      val selected_genes = weights.zipWithIndex.sortBy(-_._1)
+      outputWriter.write("Computed relief weights := " + selected_genes.toList.toString() + "\n")
+      outputWriter.close()
+    }
+
+    //knn_training_test(nb_features=1, nb_sample_relief = 200)
+    //knn_exhaustive(max_nb_features = 5)
+
+    //reliefF_output(n = 250)
+
+    //lassoRegression()
+
+    SmilePlotting.featurePlot(List(6709, 3333), gse_type, Array("CML", "CLL"))
+    SmilePlotting.featurePlot(List(70, 12346), gse_type, Array("CML", "CLL"))
   }
 
 }
@@ -228,17 +258,26 @@ class LGA extends Serializable {
     w
   }
 
-  def kNearest(g : Gse, k : Int, gse_data : Iterable[Gse])(diff: (Float, Float) => Float): List[Gse] ={
+  //TODO: Implement Heap/Set for kNearest
+  def kNearest(g : Gse, k : Int, gse_data : Iterable[Gse])(diff: (Float, Float) => Float): List[Gse] = {
     gse_data.toList.sortBy(gse => diffOfArrays(gse.geneData, g.geneData)(diff)).take(k)
   }
-  //TODO: TEST RELIEFF EXTENSIVELY
+
   //ReliefF algorithm implementation allowing multi-class feature selection
-  def reliefF(gse_data : RDD[(String, Gse)], n : Int, k: Int, n_genes : Int, n_classes : Int, classesProbabilities : Map[String, Float])(diff: (Float, Float) => Float) : Array[Float] = {
+  //k = 10 is an empirical good choice
+  def reliefF(gse_data : RDD[(String, Gse)], n : Int, k: Int = 10, n_genes : Int, classesP : Option[Map[String, Float]])(diff: (Float, Float) => Float) : Array[Float] = {
     val w = new Array[Float](n_genes)
-    //Group by subtype, costy operation
+    //Group by subtype, costly operation
     val gse_grouped : RDD[(String, Iterable[Gse])] = gse_data.map{
       case (_, gse @ Gse(_, _, stype, _)) => (stype, gse)
     }.groupByKey().persist()
+
+    //If the prior class probabilities are not provided, compute them from the data set
+    val classesProbabilities : Map[String, Float] = if(classesP.isEmpty){
+      val mapped = gse_grouped.mapValues(_.toList.size)
+      val number_sample = mapped.values.reduce(_ + _).toFloat
+      mapped.mapValues(_ / number_sample).collect.toMap
+    }else classesP.get
 
     for(r <- gse_data.takeSample(withReplacement = false, n)){
       //Find the k nearest hits
@@ -268,7 +307,64 @@ class LGA extends Serializable {
         w(idx) -= hitsWeight(idx)
         w(idx) += missesWeight(idx)
       }
+
     }
+    w
+  }
+
+  def reliefF_print(gse_data : RDD[(String, Gse)], n : Int, k: Int = 10, n_genes : Int, classesP : Option[Map[String, Float]])(diff: (Float, Float) => Float) : Array[Float] = {
+    val writer = new PrintWriter(new File("results/reliefF_stability_" + n + ".txt"))
+    var cnt = 0
+    val w = new Array[Float](n_genes)
+    //Group by subtype, costly operation
+    val gse_grouped : RDD[(String, Iterable[Gse])] = gse_data.map{
+      case (_, gse @ Gse(_, _, stype, _)) => (stype, gse)
+    }.groupByKey().persist()
+
+    //If the prior class probabilities are not provided, compute them from the data set
+    val classesProbabilities : Map[String, Float] = if(classesP.isEmpty){
+      val mapped = gse_grouped.mapValues(_.toList.size)
+      val number_sample = mapped.values.reduce(_ + _).toFloat
+      mapped.mapValues(_ / number_sample).collect.toMap
+    }else classesP.get
+
+    for(r <- gse_data.takeSample(withReplacement = false, n)){
+      //Find the k nearest hits
+      val khits : List[Gse] = kNearest(r._2, k, gse_grouped.filter{case (cl, _) => cl == r._1}.values.collect()(0)
+        .filter(_.id != r._2.id))(diff)
+      //Find the k nearest misses per class
+      val kmisses : Map[String, List[Gse]] = gse_grouped.filter{_._1 != r._1}.mapValues(v => kNearest(r._2, k, v)(diff))
+        .collect().toMap
+
+      //Compute the weights to be added/subtracted to our weight vector
+      val hitsWeight : Array[Float] = khits.map(gse => diffOfElements(r._2.geneData, gse.geneData)(diff))
+        .reduce(diffOfElements(_, _)(_ + _)).map(_ / (n * k))
+
+      val pNotR = 1 - classesProbabilities(r._1)
+
+      val missesWeightList : List[Array[Float]] = kmisses.map{
+        case(cl, l) =>
+          val probFactor = classesProbabilities(cl) / pNotR
+          l.map(gse => diffOfElements(r._2.geneData, gse.geneData)(diff))
+            .reduce(diffOfElements(_, _)(_ + _)).map(_ * probFactor / (n * k))
+      }.toList
+
+      val missesWeight = missesWeightList.reduce(diffOfElements(_, _)(_ + _))
+
+
+      //update the weight vector
+      for(idx <- (0 until n_genes).par){
+        w(idx) -= hitsWeight(idx)
+        w(idx) += missesWeight(idx)
+      }
+      writer.write(cnt + ",")
+      for (idx <- 0 until n_genes) {
+        writer.write(w(idx) + ",")
+      }
+      writer.write("\n")
+      cnt += 1
+    }
+    writer.close()
     w
   }
 
