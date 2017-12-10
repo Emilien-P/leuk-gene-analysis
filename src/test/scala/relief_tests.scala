@@ -35,6 +35,6 @@ class relief_tests extends FunSuite{
     )
 
     val prob : Map[String, Float] = Map("class1" -> 0.5f, "class2" -> 0.5f)
-   print(LGA.reliefF(test_data, 4, 2, 4, Option(prob))(LGA.manhattan).toList)
+   print(LGA.reliefF(test_data, 4, 2, Option(prob), 4)(LGA.manhattan).toList)
   }
 }
