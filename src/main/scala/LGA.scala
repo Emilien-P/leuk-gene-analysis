@@ -306,7 +306,7 @@ object LGA extends LGA {
       val timeStamp : String = new SimpleDateFormat("yyyyMMddHHmm").format(new Date())
       val outputWriter = new PrintWriter(new File("results/iterative_normal_ex" + timeStamp + ".txt"))
 
-      val setClasses : Set[String] = Set("MDS", "CLL")
+      val setClasses : Set[String] = Set("MDS", "CLL", "CML", "T-ALL")
       val listClasses = setClasses.toList
       outputWriter.write("Training and testing with : " + setClasses + "\n")
       val gse_filtered = gse_type.filter{case (typ, _) => setClasses.contains(typ)}
@@ -323,9 +323,8 @@ object LGA extends LGA {
           data.zipWithIndex.filter{case (_, idx) => genesOfInterest.toSet.contains(idx)}
             .unzip._1.map(_.toDouble)
         }.collect()
-        val x = filtered.unzip._2
-        val y = filtered.unzip._1.map(listClasses.indexOf(_))
-        print(y.toList)
+        val x : Array[Array[Double]]= filtered.unzip._2
+        val y : Array[Int] = filtered.unzip._1.map(listClasses.indexOf(_))
         val knn = smile.classification.randomForest(x, y)
         //Training the classifier
         val testingData : Array[Gse] = testing_equil.values.collect().flatten
@@ -336,54 +335,74 @@ object LGA extends LGA {
         accuracy
       }
 
-      val iterativeList1 : List[Int]= iterativeReliefF(raw_genes_array_splited, geneIdToIndex, nb_features._2, training, 175 ,n_genes = genes_number,
+      val iterativeList1 : List[Int]= iterativeReliefF(raw_genes_array_splited, geneIdToIndex, nb_features._2, training, 300 ,n_genes = genes_number,
         thresh = 0.75f, classesP = Option.empty)(manhattan).unzip._2.toList
 
-      val iterativeList2 : List[Int]= iterativeReliefF(raw_genes_array_splited, geneIdToIndex, nb_features._2, training, 175 ,n_genes = genes_number,
-        thresh = 0.75f, classesP = Option.empty)(manhattan).unzip._2.toList
-
-      val iterativeList3 : List[Int]= iterativeReliefF(raw_genes_array_splited, geneIdToIndex, nb_features._2, training, 175 ,n_genes = genes_number,
-        thresh = 0.75f, classesP = Option.empty)(manhattan).unzip._2.toList
-
-      /*val iterativeList1 : List[Int]= scala.util.Random.shuffle((0 until genes_number).toList)
-
-      val iterativeList2 : List[Int]= scala.util.Random.shuffle((0 until genes_number).toList)
-
-      val iterativeList3 : List[Int]= scala.util.Random.shuffle((0 until genes_number).toList)*/
-
-      for(nb_f <- nb_features._1 to nb_features._2){
-        //for(nb_nn <- nb_neighbors._1 until nb_neighbors._2 by 2){
-
-          val accuracy : List[Double] = List(testWithGenes(iterativeList1.take(nb_f), setClasses, manhattan, 0, List("Iterative")),
-            testWithGenes(iterativeList2.take(nb_f), setClasses, manhattan, 0, List("Iterative")),
-            testWithGenes(iterativeList3.take(nb_f), setClasses, manhattan, 0, List("Iterative"))).sorted
-
-          outputWriter.write(accuracy(1) + ",")
-        //}
-        outputWriter.write("\n")
-      }
-      outputWriter.write("Normal \n\n\n")
-      /*
-      val weightList = reliefF(training, 175, genes_number, Option.empty)(manhattan)
 
       for(nb_f <- nb_features._1 to nb_features._2){
         for(nb_nn <- nb_neighbors._1 until nb_neighbors._2 by 2){
-          val normalList1 : List[Int] = weightList.zipWithIndex.sortBy(-_._1).take(nb_f).unzip._2.toList
+          val accuracy : Double = testWithGenes(iterativeList1.take(nb_f), setClasses, manhattan, nb_nn, List("Iterative"))
 
-          val normalList2 : List[Int] = weightList.zipWithIndex.sortBy(-_._1).take(nb_f).unzip._2.toList
-
-          val normalList3 : List[Int] = weightList.zipWithIndex.sortBy(-_._1).take(nb_f).unzip._2.toList
-
-          val accuracy : List[Double] = List(testWithGenes(normalList1, setClasses, manhattan, nb_nn, List("Normal")),
-            testWithGenes(normalList2, setClasses, manhattan, nb_nn, List("Normal")),
-            testWithGenes(normalList3, setClasses, manhattan, nb_nn, List("Normal"))).sorted
-
-          outputWriter.write(accuracy(1) + ",")
+          outputWriter.write(accuracy + ",")
         }
         outputWriter.write("\n")
-      }*/
+      }
       outputWriter.close()
     }
+
+    def chiSquareRatio(nb_features : (Int, Int), nb_neighbors : (Int, Int)) : Unit = {
+      val timeStamp : String = new SimpleDateFormat("yyyyMMddHHmm").format(new Date())
+      val outputWriter = new PrintWriter(new File("results/chi_square_ex" + timeStamp + ".txt"))
+
+      val setClasses : Set[String] = Set("MDS", "CLL", "CML", "T-ALL")
+      val listClasses = setClasses.toList
+      outputWriter.write("Training and testing with : " + setClasses + "\n")
+      val gse_filtered = gse_type.filter{case (typ, _) => setClasses.contains(typ)}
+      val Array(testing, training) = gse_filtered.randomSplit(Array(.2, .8))
+
+      val testing_grouped = testing.groupByKey().persist()
+
+      val minTest = testing_grouped.mapValues(_.size).collect().unzip._2.min
+      val testing_equil = testing_grouped.mapValues(_.take(minTest)).persist()
+
+      val train_array : Array[(String, Array[Double])] = training.mapValues{case Gse(_, _, _, data) =>
+        data.zipWithIndex.unzip._1.map(_.toDouble)
+      }.collect()
+
+      def testWithGenes(genesOfInterest: List[Int], classes : Set[String], diff: (Float, Float) => Float,
+                        nb_nn :Int, flags : List[String]): Double = {
+        val filtered : Array[(String, Array[Double])] = train_array
+          .map{case (str, data) => (str, data.zipWithIndex
+            .filter{case (_, idx) => genesOfInterest.toSet.contains(idx)}.unzip._1)}
+
+        val x : Array[Array[Double]]= filtered.unzip._2
+        val y : Array[Int] = filtered.unzip._1.map(listClasses.indexOf(_))
+        val knn = smile.classification.randomForest(x, y)
+        //Training the classifier
+        val testingData : Array[Gse] = testing_equil.values.collect().flatten
+        val pred : Array[Int] = testingData.map(onlySelectedGenes(_, genesOfInterest.toSet))
+          .map(x => knn.predict(x))
+        val truth : Array[Int] = testingData.map{case Gse(_, _, typ, _) => listClasses.indexOf(typ)}
+        val accuracy = smile.validation.accuracy(truth , pred)
+        accuracy
+      }
+
+      val x = train_array.unzip._2
+
+      val y = train_array.unzip._1.map(listClasses.indexOf(_))
+
+      val scores : Array[Double] = smile.feature.sumSquaresRatio(x, y)
+
+      val features : List[Int] = scores.zipWithIndex.sortBy(-_._1).unzip._2.toList
+
+      for(nb_f <- nb_features._1 to nb_features._2){
+          val accuracy : Double = testWithGenes(features.take(nb_f),setClasses, manhattan, 0, List("ChiSquared"))
+          outputWriter.write(accuracy + ",")
+        outputWriter.write("\n")
+      }
+      outputWriter.close()
+    }
+
 
     //knn_training_test(nb_features=1, nb_sample_relief = 200)
     //knn_exhaustive(max_nb_features = 5)
@@ -400,7 +419,11 @@ object LGA extends LGA {
     //SmilePlotting.featurePlot(List(6709, 3333), gse_type, Array("CML", "CLL"))
     //SmilePlotting.featurePlot(List(70, 12346), gse_type, Array("CML", "CLL"))
 
-    exhaustiveNormalVsIterative((1, 20), (1, 21))
+    exhaustiveNormalVsIterative((1, 30), (1, 2))
+
+    //chiSquareRatio((1, 20), (1, 21))
+
+    //corrMatOf(List(17503, 7171, 8539, 17037, 16362))
   }
 
 }
@@ -451,7 +474,7 @@ class LGA extends Serializable {
     w
   }
 
-  //TODO: Implement Heap/Set for kNearest
+  //Implement Heap/Set for kNearest, this is really expensive but works just as testing purpose
   def kNearest(g : Gse, k : Int, gse_data : Iterable[Gse])(diff: (Float, Float) => Float): List[Gse] = {
     gse_data.toList.sortBy(gse => diffOfArrays(gse.geneData, g.geneData)(diff)).take(k)
   }
@@ -579,7 +602,7 @@ class LGA extends Serializable {
         },
           n, n_genes, classesP, k)(diff)
         val sorted : List[(Float, Int)] = w.zipWithIndex.sortBy(-_._1).take(10).toList
-        val topGene : (Float, Int) = sorted.head
+        val topGene : (Float, Int) = sorted.filter{case(_, idx) => !selected.unzip._2.contains(idx)}.head
         val topIdx = topGene._2
         val topStd = stddev(raw_data(topIdx))
         var toRemove : Set[Int] = Set.empty
@@ -601,10 +624,10 @@ class LGA extends Serializable {
   def corrMatrix(raw_gene_data : RDD[Array[Float]], selectedGenes : List[Int]) : List[List[Double]] = {
     val raw_data: Array[Array[Float]] = raw_gene_data.collect()
     (for {
-      idx1: Int <- selectedGenes.indices
+      idx1: Int <- selectedGenes
       std1 = stddev(raw_data(idx1))
     } yield (for {
-      idx2: Int <- selectedGenes.indices
+      idx2: Int <- selectedGenes
       std2 = stddev(raw_data(idx2))
     } yield (DescriptiveStats.cov[Float](raw_data(idx1), raw_data(idx2)), std1 * std2)).toList
         .map{case (x : Float, y : Double) => x / y}).toList
